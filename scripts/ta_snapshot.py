@@ -106,7 +106,7 @@ def _find_col(df, prefix, exclude=()):
 
 
 def compute_indicators(df):
-    import pandas_ta as ta  # noqa: F401  (registers the .ta accessor)
+    import pandas_ta_classic as ta  # noqa: F401  (registers the .ta accessor)
 
     out = df.copy()
     out.columns = [c.capitalize() if c.lower() in
