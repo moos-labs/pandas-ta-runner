@@ -39,9 +39,37 @@ import pandas as pd
 
 RESULTS_DIR = "results"
 
+# Walk-forward floor (borsagator #436, design §1.3): 60 sessions cover
+# MACD(26) + Bollinger(20) + ADX(14) + RSI(14) with margin. A cutoff
+# with less usable history than this is not a scorable cutoff -- the
+# runner fails loudly rather than snapshotting a half-warmed-up series.
+# (EMA(200) is exempt: it is recorded as unavailable, never faked from
+# a short window.)
+MIN_ROWS = 60
+
 
 def log(msg):
     print(msg, flush=True)
+
+
+def apply_asof(df, as_of, min_rows=MIN_ROWS):
+    """Walk-forward cutoff (borsagator #436): keep only sessions on or
+    before ``as_of`` (YYYY-MM-DD), then fail loudly if fewer than
+    ``min_rows`` sessions remain.
+
+    Truncation happens here, inside the runner after fetch and before
+    any indicator call, so no row dated after the cutoff can reach the
+    indicators. ``as_of`` itself is kept; a cutoff on a non-session
+    date keeps the last session on/before it.
+    """
+    cutoff = pd.Timestamp(as_of)
+    out = df[df.index <= cutoff]
+    if len(out) < min_rows:
+        raise RuntimeError(
+            f"--as-of {as_of}: only {len(out)} sessions on/before the "
+            f"cutoff (< {min_rows} minimum rows); refusing to snapshot"
+        )
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -152,10 +180,12 @@ def _val(row, col):
     return round(float(v), 4)
 
 
-def build_snapshot(ticker, df, cols, rows_total, rows_used, drop_before):
+def build_snapshot(ticker, df, cols, rows_total, rows_used, drop_before,
+                   as_of=None):
     last = df.iloc[-1]
     snap = {
         "ticker": ticker,
+        "as_of": as_of,
         "date": str(df.index[-1].date()),
         "open": _val(last, "Open"),
         "high": _val(last, "High"),
@@ -258,6 +288,10 @@ def write_report(path, snap):
                  + (f", after dropping rows before {snap['drop_before']}"
                     if snap["drop_before"] else "")
                  + f"; {snap['rows_fetched']} rows fetched in total.")
+    if snap.get("as_of"):
+        lines.append(f"- As-of cutoff: **{snap['as_of']}** (walk-forward "
+                     "backtest, borsagator #436 — every session after the "
+                     "cutoff was dropped before the indicators ran).")
     lines.append("")
     lines.append("## Latest values")
     lines.append("")
@@ -305,6 +339,12 @@ def main():
                          "keep the full history. The pilot default drops "
                          "POUL.CA's corrupted pre-2019 segment (stale, "
                          "flat prices on a different scale).")
+    ap.add_argument("--as-of", default=None,
+                    help="Walk-forward cutoff (YYYY-MM-DD, borsagator "
+                         "#436): drop every session after this date "
+                         "before computing any indicator, so the snapshot "
+                         "sees only data available at the close of that "
+                         "date.")
     args = ap.parse_args()
 
     os.makedirs(RESULTS_DIR, exist_ok=True)
@@ -341,9 +381,15 @@ def main():
     else:
         df_used = df
 
+    if args.as_of:
+        df_used = apply_asof(df_used, args.as_of)
+        log(f"[as-of] cutoff={args.as_of} rows_on_or_before={len(df_used)} "
+            f"last_session={df_used.index[-1].date()}")
+
     ind, cols = compute_indicators(df_used)
     snap = build_snapshot(args.ticker, ind, cols, rows_total,
-                          int(len(df_used)), drop_before)
+                          int(len(df_used)), drop_before,
+                          as_of=args.as_of)
 
     with open(os.path.join(RESULTS_DIR, "ta_snapshot.json"), "w",
               encoding="utf-8") as f:
